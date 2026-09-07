@@ -267,9 +267,10 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
       const mailRefs = eligible.map(doc => db.doc('email/' + c.PREFIX + c.hash(eventId + ':' + doc.id)));
       const existing = mailRefs.length ? await tx.getAll(...mailRefs) : [];
       if (existing.some(doc => doc.exists)) throw problem(500, 'Collisione nella coda email.');
-      const message = details ? c.buildMessage({ ...notice, details, generatedAt: now }) : null;
       for (let i = 0; i < eligible.length; i++) {
         const recipient = eligible[i], data = recipient.data(), mailRef = mailRefs[i];
+        const recipientName = userRow(byUid.get(recipient.id), directory).name;
+        const message = c.buildMessage({ ...notice, details, generatedAt: now, recipientName });
         const mail = {
           to: data.email, from: c.MAIL_FROM, replyTo: 'info@generalcoppersrl.com',
           message, kind: c.KIND,

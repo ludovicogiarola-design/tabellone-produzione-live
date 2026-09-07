@@ -147,6 +147,28 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     await assert.rejects(service.api('Bearer admin-token', { ...request, requestId: 'another_request_123456' }),
       error => error.status === 429);
   });
+  test('Each selected recipient receives their own current account name as assignee', async () => {
+    await select();
+    users.get(worker.uid).displayName = 'Mario <Rossi>';
+    const second = { ...worker, uid: 'worker2', email: 'second@example.com', displayName: 'Sara Bianchi' };
+    users.set(second.uid, second);
+    await db.doc('powderUsers/worker2').set({ enabled: true, isAdmin: false, email: second.email });
+    await select(second.uid);
+    await createWork('assigned-fba');
+    const result = await service.api('Bearer admin-token', {
+      action: 'sendSummary', requestId: 'assigned_request_123456', recipientName: 'Injected name',
+    });
+    assert.equal(result.queuedCount, 2);
+    const mails = (await db.collection('email').get()).docs.map(doc => doc.data());
+    const first = mails.find(mail => mail.to === worker.email);
+    const other = mails.find(mail => mail.to === second.email);
+    assert.ok(first.message.text.includes('Incaricato: Mario <Rossi>'));
+    assert.ok(first.message.html.includes('Incaricato: Mario &lt;Rossi&gt;'));
+    assert.ok(other.message.text.includes('Incaricato: Sara Bianchi'));
+    assert.ok(!first.message.text.includes('Sara Bianchi'));
+    assert.ok(!other.message.text.includes('Mario <Rossi>'));
+    assert.ok(mails.every(mail => !mail.message.text.includes('Injected name')));
+  });
   test('Manual summary requires a recipient and can report zero pending work', async () => {
     const request = { action: 'sendSummary', requestId: 'manual_zero_123456' };
     await assert.rejects(service.api('Bearer admin-token', request), error => error.status === 400);

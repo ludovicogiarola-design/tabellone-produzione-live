@@ -53,13 +53,13 @@ test('Worker membership does not confer administrator access', () => {
     admin: true, role: 'admin', userRole: 'administrator', roles: ['admin'] } }]).admin, false);
   assert.equal(c.accessFor(user, [{ id: 'worker', data: { enabled: true, isAdmin: true } }]).admin, true);
 });
-test('Operational email details products, pieces, urgency, location and procedure in Picking colours', () => {
+test('Operational email details assignee, products, pieces, urgency, location and procedure', () => {
   const details = c.pendingDetails([{ id: 'fba', data: fba({ workflowLabel: 'ID flusso di lavoro: private-uuid',
     workflow: { shipments: [{ code: 'FBA15TEST' }] }, lines: [
       { sku: 'NEEM500', title: 'Bionee Neem 500 ml – Prodotto naturale SKU: NEEM500 ASIN: PRIVATE', qty: 24 },
       { sku: 'SOAP', title: 'Sapone <script>alert(1)</script>', qty: 60 },
     ] }) }], [{ id: 'fbm', data: fbm() }]);
-  const message = c.buildMessage({ type: 'fba', label: 'FBA15TEST', details });
+  const message = c.buildMessage({ type: 'fba', label: 'FBA15TEST', details, recipientName: 'Mario <Rossi>' });
   assert.ok(!/[\r\n]/.test(message.subject));
   assert.ok(message.text.includes('?picking=fba'));
   assert.equal(message.subject, 'Picking Concamarise | FBA urgente: 84 pezzi | FBM: 1 ordine');
@@ -71,9 +71,11 @@ test('Operational email details products, pieces, urgency, location and procedur
   assert.ok(message.html.includes('FBA15TEST'));
   assert.ok(!message.html.includes('flusso') && !message.html.includes('private-uuid'));
   assert.ok(!message.html.includes('ASIN: PRIVATE'));
-  assert.ok(message.html.includes('#0f7078') && message.html.includes('#003c41'));
+  assert.ok(message.text.includes('Incaricato: Mario <Rossi>'));
+  assert.ok(message.html.includes('Incaricato: Mario &lt;Rossi&gt;'));
+  assert.ok(!message.html.includes('<Rossi>'));
   assert.ok(message.html.includes('&lt;script&gt;'));
-  assert.ok(!message.html.includes('<script>') && !message.html.includes('#f97316'));
+  assert.ok(!message.html.includes('<script>'));
   assert.ok(message.html.includes('Procedura da seguire'));
 });
 test('Product aggregation totals pieces and preserves per-order allocations without duplicate documents', () => {

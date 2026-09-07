@@ -15,11 +15,17 @@ Ultimo accesso indica lastSignInTime, cioè l'ultima autenticazione dell'account
 - Invia riepilogo: invio manuale ai soli utenti spuntati, con totali aggiornati
   dei pezzi e prodotti FBA e degli ordini e pezzi FBM ancora da evadere. Si può inviare anche con zero
   ordini. Il riepilogo giornaliero mostra entrambi i totali, anche se sono zero.
-- Le email usano HTML e testo semplice. Grafica Picking verde e grigia su sfondi
-  bianchi o verde chiaro, con testo scuro e caratteri più leggibili,
-  con un avviso operativo e la procedura per lo stabilimento LG Trading SRL di
+- Le email usano HTML e testo semplice. Grafica operativa ispirata alle email
+  transazionali Amazon: fondo bianco, testo scuro, separatori grigi, pulsante
+  giallo e tabelle compatte. L'identità del mittente resta LG Trading SRL / Picking.
+  L'avviso include la procedura per lo stabilimento LG Trading SRL di
   Concamarise. Se ci sono prodotti FBA, l'avviso richiede preparazione prioritaria
   per il carico Amazon, senza inventare una data o un orario di ritiro.
+- Ogni mail indica in alto Incaricato: Nome Cognome. Il nome viene risolto sul
+  server dall'account del singolo destinatario, con gli stessi criteri del
+  pannello utenti (Auth, profilo, email in assenza di nome). Il contenuto viene
+  generato separatamente per ogni destinatario; il browser non può indicare il
+  nome dell'incaricato nel payload dell'invio.
 - Il mittente visualizzato è LG Trading SRL - Picking Concamarise. L'oggetto
   ha un massimo di 100 caratteri: priorità FBA, pezzi FBA e ordini FBM. Ad esempio:
   Picking Concamarise | FBA urgente: 348 pezzi | FBM: 5 ordini.
