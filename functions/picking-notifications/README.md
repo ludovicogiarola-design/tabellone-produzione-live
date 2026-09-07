@@ -15,13 +15,15 @@ Ultimo accesso indica lastSignInTime, cioè l'ultima autenticazione dell'account
 - Invia riepilogo: invio manuale ai soli utenti spuntati, con totali aggiornati
   dei pezzi e prodotti FBA e degli ordini e pezzi FBM ancora da evadere. Si può inviare anche con zero
   ordini. Il riepilogo giornaliero mostra entrambi i totali, anche se sono zero.
-- Le email usano HTML e testo semplice. Grafica Picking verde #0f7078 e grigia,
+- Le email usano HTML e testo semplice. Grafica Picking verde e grigia su sfondi
+  bianchi o verde chiaro, con testo scuro e caratteri più leggibili,
   con un avviso operativo e la procedura per lo stabilimento LG Trading SRL di
   Concamarise. Se ci sono prodotti FBA, l'avviso richiede preparazione prioritaria
   per il carico Amazon, senza inventare una data o un orario di ritiro.
 - Il mittente visualizzato è LG Trading SRL - Picking Concamarise. L'oggetto
-  riporta totali, nomi sintetici dei prodotti, SKU e quantità. Per liste molto
-  lunghe indica esplicitamente quanti prodotti proseguono nel corpo della mail.
+  ha un massimo di 100 caratteri: priorità FBA, pezzi FBA e ordini FBM. Ad esempio:
+  Picking Concamarise | FBA urgente: 348 pezzi | FBM: 5 ordini.
+  Il limite usa formulazioni complete, senza tagliare parole o quantità.
   HTML e testo riportano sempre tutti i prodotti, i riferimenti di spedizione
   Amazon o di ordine FBM e le quantità assegnate a ciascuno. Il totale FBA
   distingue pezzi da preparare e prodotti distinti (SKU), senza contare i flussi.

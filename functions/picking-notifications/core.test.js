@@ -62,9 +62,8 @@ test('Operational email details products, pieces, urgency, location and procedur
   const message = c.buildMessage({ type: 'fba', label: 'FBA15TEST', details });
   assert.ok(!/[\r\n]/.test(message.subject));
   assert.ok(message.text.includes('?picking=fba'));
-  assert.ok(message.subject.includes('FBA URGENTE: 84 pezzi / 2 prodotti'));
-  assert.ok(message.subject.includes('NEEM500') && message.subject.includes('24 pz'));
-  assert.ok(message.subject.includes('FBM: 1 ordine / 2 pezzi'));
+  assert.equal(message.subject, 'Picking Concamarise | FBA urgente: 84 pezzi | FBM: 1 ordine');
+  assert.ok(!message.subject.includes('NEEM500'));
   assert.ok(message.text.includes('Totale FBA: 84 pezzi · 2 prodotti'));
   assert.ok(message.text.includes('Stabilimento LG Trading SRL di Concamarise'));
   assert.ok(message.text.includes('Registrare in Picking i prelievi completati.'));
@@ -97,8 +96,15 @@ test('Long product lists remain complete in the email with an explicitly bounded
     title: 'Prodotto numero ' + i + ' – Descrizione completa da mantenere nella mail', qty: i + 1 }));
   const details = c.pendingDetails([{ id: 'f', data: fba({ lines }) }], []);
   const message = c.buildMessage({ details });
-  assert.ok(Buffer.byteLength(message.subject, 'utf8') < 900);
-  assert.ok(message.subject.includes('prodotti: dettagli nella mail'));
+  assert.equal(message.subject, 'Picking Concamarise | FBA urgente: 12.880 pezzi');
+  assert.ok(message.subject.length <= 100);
+  for (const total of [Number.MAX_SAFE_INTEGER, 1e100]) {
+    const large = c.buildMessage({ details: { fba: { ...details.fba, totalQty: total },
+      fbm: { ...details.fbm, orderCount: total } } });
+    assert.ok(large.subject.length <= 100);
+    assert.ok(large.subject.includes('FBA urgente') && large.subject.includes('FBM'));
+    assert.ok(!large.subject.includes('…'));
+  }
   for (const line of lines) {
     assert.ok(message.html.includes('SKU: ' + line.sku + '</div>'));
     assert.ok(message.text.includes('SKU: ' + line.sku + ' | ' + line.qty + ' pezzi'));
