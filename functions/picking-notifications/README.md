@@ -1,74 +1,78 @@
-# Picking: email per nuovi FBA e FBM
+# Picking: notifiche email e riepiloghi
 
-Nel menu Notifiche l'amministratore seleziona gli utenti abilitati, già registrati
-in Firebase Auth. Email e nome provengono dall'account; gli inviti per email e i
-documenti UID vengono ricondotti allo stesso account. Nessun destinatario viene
-attivato automaticamente.
+Nel menu Notifiche l'amministratore seleziona gli account già registrati.
+Nome, email e ultimo accesso provengono da Firebase Auth; gli inviti per email
+e i documenti UID vengono ricondotti allo stesso account.
+Ultimo accesso indica lastSignInTime, cioè l'ultima autenticazione dell'account.
 
-## Flusso
+## Invii
 
-- FBA: prima comparsa di un flusso operativo in
-  amzInventory/concamarise/logs/{flowId}.
-- FBM: prima comparsa di un ordine attivo con righe da preparare in
-  shopifyFbmOrders/{orderId}. I log Shopify di magazzino non duplicano l'avviso.
-- Una transazione crea il registro dell'evento e una singola email per ogni UID
-  selezionato. Le risincronizzazioni e le consegne duplicate di Eventarc vengono
-  deduplicate tramite un identificatore stabile.
-- Viene riutilizzata la collezione email dell'estensione Firebase già attiva,
-  con mittente info@generalcoppersrl.com. Non sono necessari nuovi provider,
-  segreti, API, code o permessi IAM.
-- L'interfaccia legge l'ora dell'ultimo invio da delivery.endTime, solo dopo
-  SUCCESS e conferma SMTP dell'indirizzo previsto. Questo conferma
-  l'accettazione da parte del server email, non la lettura del lavoratore.
+- FBA: email all'arrivo di ogni nuovo flusso operativo in
+  amzInventory/concamarise/logs/{flowId}. Il registro dell'evento evita duplicati
+  per risincronizzazioni, modifiche ordinarie e retry di Eventarc.
+- FBM: riepilogo ogni giorno alle 08:00 Europe/Rome, con cambio automatico
+  tra ora solare e legale. Nessun invio all'arrivo del singolo ordine FBM.
+- Invia riepilogo: invio manuale ai soli utenti spuntati, con totali aggiornati
+  di flussi FBA e ordini FBM ancora da evadere. Si può inviare anche con zero
+  ordini. Il riepilogo giornaliero mostra entrambi i totali, anche se sono zero.
+- Le email usano HTML e testo semplice. Grafica Picking verde #0f7078 e grigia,
+  due totali e pulsante Apri Picking; il nuovo FBA include il suo riferimento.
+- I conteggi leggono le fonti operative in una transazione. Escludono annullati,
+  completati, prelevati e duplicati dei log Shopify. Per FBM si sottrae il
+  maggiore tra shippedQty e inventoryAppliedQty; righe già azzerate non vengono
+  recuperate dai vecchi dettagli dell'ordine.
 
-## Accessi e gestione errori
+## Accessi e affidabilità
 
-Le nuove collezioni pickingEmailConfig, pickingEmailRecipients,
-pickingEmailEvents e pickingEmailDeliveries sono protette dal default deny
-delle regole Firestore esistenti. Il frontend usa soltanto l'API autenticata:
-il flag isAdmin protetto dalle regole viene riletto sul server a ogni richiesta.
-I campi liberi del profilo, come role/admin, non conferiscono autorizzazioni.
-
-Il backend usa l'identità già utilizzata dalle funzioni email del Tabellone,
-537555699968-compute@developer.gserviceaccount.com; non modifica le policy IAM.
+Si riutilizzano la collezione email e l'estensione Firebase già attiva,
+con mittente info@generalcoppersrl.com, senza nuove credenziali email.
+Le collezioni pickingEmailConfig, pickingEmailRecipients, pickingEmailEvents e
+pickingEmailDeliveries sono protette dalle regole Firestore default deny.
+L'API verifica il token revocato e rilegge il flag isAdmin protetto dalle regole
+per ogni richiesta. I campi liberi role/admin non conferiscono autorizzazioni.
 
 Un utente disattivato, con email non verificata o cambiata dopo la selezione non
-riceve avvisi. Le modifiche alla selezione usano una revisione per evitare
-sovrascritture da schermate obsolete.
+riceve avvisi. Le modifiche ai destinatari usano una revisione concorrente.
+L'invio manuale accetta un identificatore univoco della richiesta, mantenuto dal
+frontend anche quando la risposta di rete va persa; una transazione permette
+un solo riepilogo per richiesta e un nuovo invio manuale al massimo al minuto.
+I destinatari vengono sempre ricavati sul server, mai dal payload del browser.
 
-Per errori SMTP temporanei espliciti o errori prima della connessione, la
-funzione di consegna attende 60 secondi e poi 300 secondi: massimo tre tentativi
-SMTP totali. Durante l'attesa il frontend non deve rimanere aperto. La
-transazione ricontrolla destinatario, revisione, ordine e tentativo corrente.
-Le interruzioni dell'esecuzione vengono riprese tramite retry di Eventarc.
-Gli esiti ambigui dopo DATA non vengono ritentati automaticamente per evitare
-email duplicate e sono mostrati come esito da verificare.
+L'ultimo invio viene aggiornato solo dopo SUCCESS, accettazione SMTP dell'email
+prevista e delivery.endTime. Non indica la lettura da parte del lavoratore.
+Per errori SMTP temporanei espliciti sono consentiti tre tentativi totali,
+con attesa di 60 e poi 300 secondi nella funzione Eventarc esistente.
+Esiti ambigui dopo DATA non vengono ritentati, per evitare invii duplicati.
+I retry ricontrollano account, selezione e validità del riepilogo o flusso.
+Gli invii per singolo FBM della versione precedente non vengono ritentati.
 
-## Attivazione e deploy
+## Pianificazione e deploy
 
-Il documento server pickingEmailConfig/system contiene activatedAt, impostato
-una sola volta durante l'attivazione. Il backend esclude gli ordini precedenti
-all'attivazione e quelli arrivati prima della selezione del destinatario.
+pickingEmailFbmMorning usa Cloud Scheduler, già attivo nel progetto:
+cron 0 8 * * *, timeZone Europe/Rome, invocazione privata tramite l'identità
+Compute esistente 537555699968-compute@developer.gserviceaccount.com.
+Non vengono creati service account o assegnati ruoli a livello di progetto.
+La chiave DAILY_FBM:data-italiana evita duplicati, anche con job concorrenti.
+Le esecuzioni fuori orario o troppo vecchie vengono ignorate. Il destinatario
+deve essere già selezionato all'ora prevista; non vengono inviati arretrati.
 
-I sorgenti sono nel codebase Firebase picking-notifications.
-Il deploy delle sole quattro funzioni è:
+Il timestamp activatedAt in pickingEmailConfig/system è preservato.
+Per aggiornare questo solo codebase e rimuovere il vecchio trigger per ordine:
 
-    firebase deploy --only functions:picking-notifications --project tabellone-produzione-liv-e313e --non-interactive
+    firebase deploy --only functions:picking-notifications --project tabellone-produzione-liv-e313e --non-interactive --force
 
-Al primo deploy aggiungere --force per confermare la policy di retry idempotente
-delle tre funzioni Firestore. Il comando rimane limitato a questo codebase.
-
-Hosting viene pubblicato dal workflow già presente dopo il push su main.
-Non eseguire un deploy globale di tutte le funzioni del progetto.
+Funzioni finali: pickingEmailApi, pickingEmailFba, pickingEmailDelivery,
+pickingEmailFbmMorning. pickingEmailFbm viene eliminata come richiesto.
+Hosting viene pubblicato dal workflow esistente dopo un unico push su main.
 
 ## Verifica
 
-npm test esegue i test di classificazione, autorizzazione e politiche di retry.
-Con Firestore Emulator attivo su 127.0.0.1:8791:
+    npm test
+
+Con Firestore Emulator attivo esclusivamente su 127.0.0.1:8791:
 
     FIRESTORE_EMULATOR_HOST=127.0.0.1:8791 npm test
 
-I test di integrazione usano esclusivamente il progetto
-demo-picking-email-tests. Coprono transazioni concorrenti, annullamenti,
-selezioni obsolete, utenti disattivati, conferma invio e callback duplicate.
-Nessuna email di prova viene inviata ai lavoratori.
+I test di integrazione usano solo demo-picking-email-tests. Coprono selezione,
+accessi, riepiloghi manuali, deduplicazione, orario italiano, retry e ultimo
+invio confermato. Nessuna email di prova viene spedita ai lavoratori.

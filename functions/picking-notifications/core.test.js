@@ -53,13 +53,38 @@ test('Worker membership does not confer administrator access', () => {
     admin: true, role: 'admin', userRole: 'administrator', roles: ['admin'] } }]).admin, false);
   assert.equal(c.accessFor(user, [{ id: 'worker', data: { enabled: true, isAdmin: true } }]).admin, true);
 });
-test('Mail uses the correct tab and includes operational counts only', () => {
-  const work = c.summarizeFbm(fbm({ orderName: '#1234\r\nBcc: attacker@example.com', customerName: 'Private buyer' }), 'o');
-  const message = c.buildMessage(work);
+test('HTML mail matches Picking green/grey, escapes labels and contains only useful counts', () => {
+  const message = c.buildMessage({ type: 'fba', label: 'FBA <script>alert(1)</script>\r\nUnsafe', totals: { fba: 2, fbm: 12 } });
   assert.ok(!/[\r\n]/.test(message.subject));
-  assert.ok(message.text.includes('?picking=fbm'));
-  assert.ok(message.text.includes('1 SKU · 2 pezzi'));
-  assert.ok(!message.text.includes('Private buyer'));
+  assert.ok(message.text.includes('?picking=fba'));
+  assert.ok(message.text.includes('2 flussi FBA da evadere'));
+  assert.ok(message.text.includes('12 ordini FBM da evadere'));
+  assert.ok(message.html.includes('#0f7078') && message.html.includes('#f6f7f9'));
+  assert.ok(message.html.includes('&lt;script&gt;'));
+  assert.ok(!message.html.includes('<script>') && !message.html.includes('#f97316'));
+  assert.ok(c.buildMessage({ type: 'daily', totals: { fba: 0, fbm: 0 } }).html.includes('Riepilogo delle 08:00'));
+  assert.ok(c.buildMessage({ totals: { fba: 1, fbm: 2 } }).text.includes('?picking=fbm'));
+});
+test('Pending totals deduplicate orders and exclude shipped, picked, cancelled and FBM mirror logs', () => {
+  const orders = [{ id: '1', data: fbm() }, { id: 'duplicate', data: fbm() },
+    { id: 'shipped', data: fbm({ orderId: '2', linesByLineId: { a: { sku: 'S', reservedQty: 2, inventoryAppliedQty: 2 } },
+      orderDetails: { lineItems: [{ sku: 'S', quantity: 2 }] } }) },
+    { id: 'cancelled', data: fbm({ orderId: '3', cancelled: true }) }];
+  const flows = [{ id: 'f', data: fba() }, { id: 'f', data: fba() },
+    { id: 'fbm-log', data: fba({ source: 'shopify_fbm', fileName: 'SHOPIFY_FBM' }) },
+    { id: 'picked', data: fba({ lines: [{ sku: 'test/sku', qty: 2 }],
+      picking: { managedByPicking: true, pickedLines: { TEST_SKU: { picked: true } } } }) }];
+  assert.deepEqual(c.pendingTotals(flows, orders), { fba: 1, fbm: 1 });
+  assert.equal(c.summarizeFbm(fbm({ linesByLineId: {}, orderDetails: { lineItems: [
+    { sku: 'S', fulfillableQuantity: 0, currentQuantity: 3 }, { sku: 'GIFT', quantity: 1, giftCard: true },
+  ] } }), 'o'), null);
+});
+test('08:00 daily slot follows Italian winter/summer time and rejects other hours and late replays', () => {
+  for (const iso of ['2026-01-15T07:00:00Z', '2026-07-15T06:00:00Z', '2026-03-29T06:00:00Z', '2026-10-25T07:00:00Z']) {
+    assert.ok(c.dailySlot(iso, Date.parse(iso) + 300000));
+  }
+  assert.equal(c.dailySlot('2026-07-15T07:00:00Z', Date.parse('2026-07-15T07:00:00Z')), null);
+  assert.equal(c.dailySlot('2026-07-15T06:00:00Z', Date.parse('2026-07-16T06:00:00Z')), null);
 });
 test('Only confirmed acceptance for the intended recipient counts as success', () => {
   assert.equal(c.deliveryOutcome({ state: 'SUCCESS', info: { accepted: [user.email] } }, user.email), 'SUCCESS');

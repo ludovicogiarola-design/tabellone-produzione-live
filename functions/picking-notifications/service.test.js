@@ -57,7 +57,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
   async function select(uid = 'worker') {
     await service.api('Bearer admin-token', { action: 'setRecipient', uid, enabled: true, revision: 0 });
   }
-  async function createWork(id = '1234', channel = 'FBM') {
+  async function createWork(id = '1234', channel = 'FBA') {
     const ref = db.doc(channel === 'FBM' ? 'shopifyFbmOrders/' + id : 'amzInventory/concamarise/logs/' + id);
     const before = await ref.get();
     const data = channel === 'FBM' ? { active: true, orderId: id, orderName: '#' + id,
@@ -92,6 +92,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     const result = await service.api('Bearer admin-token', { action: 'list' });
     assert.equal(result.users.filter(row => row.uid === 'worker').length, 1);
     assert.equal(result.users.find(row => row.uid === 'worker').email, worker.email);
+    assert.equal(result.users.find(row => row.uid === 'worker').lastAccessAt, Date.parse(worker.metadata.lastSignInTime));
   });
   test('Selection is versioned and rejects stale concurrent edits', async () => {
     await select();
@@ -102,7 +103,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
   test('Concurrent duplicate events create one email and one ledger entry', async () => {
     await select();
     const event = await createWork();
-    await Promise.all([service.onNewWork(event, 'FBM'), service.onNewWork(event, 'FBM')]);
+    await Promise.all([service.onNewWork(event, 'FBA'), service.onNewWork(event, 'FBA')]);
     assert.equal((await db.collection('email').get()).size, 1);
     assert.equal((await db.collection(EVENTS).get()).size, 1);
     assert.equal((await firstMail()).data().to, worker.email);
@@ -117,30 +118,105 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     assert.equal((await db.collection('email').get()).size, 1);
     assert.ok((await firstMail()).data().message.text.includes('?picking=fba'));
   });
+  test('FBM order arrivals and updates never send an automatic email', async () => {
+    await select();
+    const event = await createWork('fbm', 'FBM');
+    await service.onNewWork(event, 'FBM');
+    await event.data.after.ref.update({ updatedAtClient: Date.now() });
+    await service.onNewWork({ ...event, data: { before: event.data.after, after: await event.data.after.ref.get() } }, 'FBM');
+    assert.equal((await db.collection('email').get()).size, 0);
+    assert.deepEqual(await service.readPendingSummary(), { fba: 0, fbm: 1 });
+  });
+  test('Manual summary uses only selected Auth recipients and remains idempotent after a lost response', async () => {
+    await select();
+    await createWork('fba');
+    await createWork('fbm', 'FBM');
+    const request = { action: 'sendSummary', requestId: 'manual_request_123456', to: 'injected@example.com' };
+    await assert.rejects(service.api('Bearer worker-token', request), error => error.status === 403);
+    const results = await Promise.all([service.api('Bearer admin-token', request), service.api('Bearer admin-token', request)]);
+    assert.deepEqual(results[0].totals, { fba: 1, fbm: 1 });
+    assert.equal(results[0].queuedCount, 1);
+    assert.equal(results.filter(r => r.alreadyQueued).length, 1);
+    assert.equal((await db.collection('email').get()).size, 1);
+    const mail = (await firstMail()).data();
+    assert.equal(mail.to, worker.email);
+    assert.equal(mail.picking.noticeType, 'manual');
+    assert.ok(mail.message.html.includes('Riepilogo Picking'));
+    await assert.rejects(service.api('Bearer admin-token', { ...request, requestId: 'another_request_123456' }),
+      error => error.status === 429);
+  });
+  test('Manual summary requires a recipient and can report zero pending work', async () => {
+    const request = { action: 'sendSummary', requestId: 'manual_zero_123456' };
+    await assert.rejects(service.api('Bearer admin-token', request), error => error.status === 400);
+    assert.equal((await db.collection('email').get()).size, 0);
+    await select();
+    assert.deepEqual((await service.api('Bearer admin-token', request)).totals, { fba: 0, fbm: 0 });
+  });
+  test('The 08:00 digest includes all pending work and concurrent schedule retries send only once', async () => {
+    await select();
+    const legacy = await createWork('old-fba');
+    await legacy.data.after.ref.set({ kind: 'scarica', fileName: 'FBALEGACY',
+      picking: { managedByPicking: true }, lines: [{ sku: 'SKU', qty: 3 }] });
+    const completed = await createWork('done-fba');
+    await completed.data.after.ref.update({ status: 'PICKED', 'picking.flowPicked': true });
+    await createWork('fbm', 'FBM');
+    const picked = await createWork('picked-fbm', 'FBM');
+    await picked.data.after.ref.update({ 'linesByLineId.a.inventoryAppliedQty': 5 });
+    const scheduled = { scheduleTime: '2030-07-01T06:00:00Z' };
+    const daily = createService({ db, auth, scheduleRetry: async () => {}, clock: () => Date.parse(scheduled.scheduleTime) });
+    const results = await Promise.all([daily.onDaily(scheduled), daily.onDaily(scheduled)]);
+    assert.deepEqual(results[0].totals, { fba: 1, fbm: 1 });
+    assert.equal((await db.collection('email').get()).size, 1);
+    assert.equal((await firstMail()).data().picking.noticeType, 'daily');
+    assert.ok((await firstMail()).data().message.html.includes('Riepilogo delle 08:00'));
+    assert.equal((await daily.onDaily({ scheduleTime: '2030-07-01T07:00:00Z' })).outcome, 'outside_schedule');
+  });
+  test('Daily selection after the scheduled time does not receive a delayed digest', async () => {
+    await select();
+    const scheduled = { scheduleTime: '2030-07-01T06:00:00Z' };
+    const time = Date.parse(scheduled.scheduleTime);
+    await db.doc(RECIPIENTS + '/worker').update({ enabledAt: Timestamp.fromMillis(time + 1000) });
+    const daily = createService({ db, auth, scheduleRetry: async () => {}, clock: () => time + 10000 });
+    assert.equal((await daily.onDaily(scheduled)).queuedCount, 0);
+    assert.equal((await db.collection('email').get()).size, 0);
+  });
+  test('Summary delivery uses the same confirmed log and retries safely without a source order', async () => {
+    await select();
+    await service.api('Bearer admin-token', { action: 'sendSummary', requestId: 'manual_retry_123456' });
+    const mail = await firstMail();
+    await deliver(mail.ref, { state: 'ERROR', attempts: 1, error: '451 temporary failure', endTime: Timestamp.now() });
+    await service.retryEmail({ data: [...tasks.values()][0].data });
+    assert.equal((await mail.ref.get()).data().delivery.state, 'RETRY');
+    const endTime = Timestamp.now();
+    await deliver(mail.ref, { state: 'SUCCESS', attempts: 2, endTime, info: { accepted: [worker.email] } });
+    const prefs = (await db.doc(RECIPIENTS + '/worker').get()).data();
+    assert.equal(prefs.lastSentAt.toMillis(), endTime.toMillis());
+    assert.equal(prefs.lastSentChannel, 'RIEPILOGO');
+  });
   test('No selected recipients means no send and no backfill on later selection', async () => {
     const event = await createWork();
-    await service.onNewWork(event, 'FBM');
+    await service.onNewWork(event, 'FBA');
     await select();
-    await service.onNewWork(event, 'FBM');
+    await service.onNewWork(event, 'FBA');
     assert.equal((await db.collection('email').get()).size, 0);
   });
   test('Cancellation before processing prevents an email', async () => {
     await select();
     const event = await createWork();
-    await event.data.after.ref.update({ active: false });
-    await service.onNewWork(event, 'FBM');
+    await event.data.after.ref.update({ voided: true });
+    await service.onNewWork(event, 'FBA');
     assert.equal((await db.collection('email').get()).size, 0);
   });
   test('Auth deactivation after selection suppresses the next alert', async () => {
     await select();
     users.set(worker.uid, { ...worker, disabled: true });
     const event = await createWork();
-    await service.onNewWork(event, 'FBM');
+    await service.onNewWork(event, 'FBA');
     assert.equal((await db.collection('email').get()).size, 0);
   });
   test('Queued mail has no sent timestamp; confirmed SMTP success updates the mini log', async () => {
     await select();
-    await service.onNewWork(await createWork(), 'FBM');
+    await service.onNewWork(await createWork(), 'FBA');
     assert.equal(c.millis((await db.doc(RECIPIENTS + '/worker').get()).data().lastSentAt), 0);
     const mail = await firstMail(), endTime = Timestamp.now();
     await deliver(mail.ref, { state: 'SUCCESS', attempts: 1, endTime, info: { accepted: [worker.email] } });
@@ -150,11 +226,11 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
   });
   test('Old success events cannot move the last sent time backward', async () => {
     await select();
-    await service.onNewWork(await createWork('first'), 'FBM');
+    await service.onNewWork(await createWork('first'), 'FBA');
     const first = await firstMail();
     const firstEnd = Timestamp.fromMillis(Date.now() - 1000);
     const oldEvent = await deliver(first.ref, { state: 'SUCCESS', attempts: 1, endTime: firstEnd, info: { accepted: [worker.email] } });
-    await service.onNewWork(await createWork('second'), 'FBM');
+    await service.onNewWork(await createWork('second'), 'FBA');
     const second = (await db.collection('email').get()).docs.find(doc => doc.id !== first.id);
     const secondEnd = Timestamp.now();
     await deliver(second.ref, { state: 'SUCCESS', attempts: 1, endTime: secondEnd, info: { accepted: [worker.email] } });
@@ -163,7 +239,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
   });
   test('Duplicate error callbacks cannot trigger multiple SMTP retries', async () => {
     await select();
-    await service.onNewWork(await createWork(), 'FBM');
+    await service.onNewWork(await createWork(), 'FBA');
     const mail = await firstMail();
     const event = await deliver(mail.ref, { state: 'ERROR', attempts: 1, error: '451 temporary failure', endTime: Timestamp.now() });
     await service.onDelivery(event);
@@ -174,7 +250,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
   });
   test('Deselecting a recipient cancels a pending retry', async () => {
     await select();
-    await service.onNewWork(await createWork(), 'FBM');
+    await service.onNewWork(await createWork(), 'FBA');
     const mail = await firstMail();
     await deliver(mail.ref, { state: 'ERROR', attempts: 1, error: '451 temporary failure', endTime: Timestamp.now() });
     await service.api('Bearer admin-token', { action: 'setRecipient', uid: 'worker', enabled: false, revision: 1 });

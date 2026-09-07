@@ -271,7 +271,7 @@
 }
 
 </style>
-<link rel="stylesheet" href="./picking-notifications.css?v=20260907">
+<link rel="stylesheet" href="./picking-notifications.css?v=20260907-summary">
 </head>
 
 <body>
@@ -541,11 +541,14 @@
             <div class="miniTop">
               <div>
                 <div class="miniTitle">Notifiche email</div>
-                <p class="pickingMailIntro">Seleziona chi deve ricevere gli avvisi per i nuovi FBA e FBM.</p>
+                <p class="pickingMailIntro">FBA all’arrivo di un nuovo flusso · FBM ogni giorno alle 08:00.</p>
               </div>
-              <button class="btn small" type="button" data-mail-refresh>Aggiorna</button>
+              <div class="pickingMailActions">
+                <button class="btn small" type="button" data-mail-refresh>Aggiorna</button>
+                <button class="btn small" type="button" data-mail-send disabled title="Invia il riepilogo agli utenti selezionati">Invia riepilogo</button>
+              </div>
             </div>
-            <div class="pickingMailHead"><span>Destinatario</span><span>Ultima email inviata</span></div>
+            <div class="pickingMailHead"><span>Destinatario</span><span>Ultimo accesso</span><span>Ultima email inviata</span></div>
             <div data-mail-list></div>
             <div class="pickingMailFeedback" role="status" aria-live="polite" data-mail-status></div>
           </div>
@@ -7394,7 +7397,7 @@ function readRackPickerSelection(root){
     async function openPickingMail(){
       if(!state.user?.isAdmin || pickingHomeView() !== "notifications") return;
       try{
-        if(!_pickingMailLoading) _pickingMailLoading = import("./picking-notifications.js?v=20260907");
+        if(!_pickingMailLoading) _pickingMailLoading = import("./picking-notifications.js?v=20260907-summary");
         const mod = await _pickingMailLoading;
         if(!state.user?.isAdmin || pickingHomeView() !== "notifications") return;
         if(!_pickingMailUi) _pickingMailUi = mod.createPickingNotifications({

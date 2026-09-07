@@ -1,10 +1,16 @@
 .pickingMailIntro { margin: 5px 0 0; color: var(--muted); font-size: 14px; line-height: 1.5; }
-.pickingMailHead { display: flex; justify-content: space-between; gap: 16px; padding: 18px 0 8px; color: var(--muted); font-size: 12px; }
-.pickingMailRow { display: grid; grid-template-columns: minmax(0,1fr) minmax(160px,240px); align-items: center; gap: 20px; padding: 16px 0; border-top: 1px solid var(--line); }
+.pickingMailActions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.pickingMailActions [data-mail-send] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pickingMailActions button:disabled { opacity: .5; cursor: default; }
+.pickingMailHead, .pickingMailRow { display: grid; grid-template-columns: minmax(0,1fr) minmax(145px,180px) minmax(145px,200px); gap: 20px; }
+.pickingMailHead { padding: 18px 0 8px; color: var(--muted); font-size: 12px; }
+.pickingMailHead span:last-child { text-align: right; }
+.pickingMailRow { align-items: center; padding: 16px 0; border-top: 1px solid var(--line); }
 .pickingMailPerson { display: flex; align-items: center; gap: 13px; cursor: pointer; min-width: 0; }
 .pickingMailCheckbox { width: 19px; height: 19px; flex: 0 0 19px; accent-color: var(--accent); cursor: pointer; }
 .pickingMailCheckbox:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
-.pickingMailIdentity, .pickingMailLog { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pickingMailIdentity, .pickingMailLog, .pickingMailAccess { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pickingMailCellLabel { display: none; color: var(--muted); font-size: 12px; }
 .pickingMailName { color: var(--ink); font-size: 15px; font-weight: 650; overflow-wrap: anywhere; }
 .pickingMailAddress { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
 .pickingMailLog { align-items: flex-end; text-align: right; }
@@ -13,8 +19,10 @@
 .pickingMailEmpty { padding: 24px 0; font-size: 14px; color: var(--muted); }
 .pickingMailFeedback { min-height: 20px; margin-top: 12px; font-size: 13px; color: var(--muted); }
 .pickingMailError { color: #b42318; }
-@media (max-width: 620px) {
-  .pickingMailRow { grid-template-columns: minmax(0,1fr); gap: 8px; padding: 15px 0; }
-  .pickingMailLog { align-items: flex-start; text-align: left; padding-left: 32px; }
-  .pickingMailHead span:last-child { display: none; }
+@media (max-width: 760px) {
+  .pickingMailRow { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; padding: 15px 0; }
+  .pickingMailPerson { grid-column: 1 / -1; }
+  .pickingMailHead { display: none; }
+  .pickingMailCellLabel { display: block; }
+  .pickingMailAccess { padding-left: 32px; }
 }

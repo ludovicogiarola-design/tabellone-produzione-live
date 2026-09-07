@@ -14,7 +14,7 @@ function problem(status, message) {
   return error;
 }
 
-function createService({ db, auth, scheduleRetry, logger = console }) {
+function createService({ db, auth, scheduleRetry, logger = console, clock = Date.now }) {
   async function readDirectory() {
     const snapshots = await Promise.all(DIRECTORY_COLLECTIONS.map(name => db.collection(name).get()));
     return snapshots.flatMap((snap, i) => snap.docs.map(doc => ({
@@ -67,6 +67,7 @@ function createService({ db, auth, scheduleRetry, logger = console }) {
         settings.enabled && settings.email !== c.email(user.email) ? 'Email cambiata: disattiva e riattiva le notifiche.' :
         !user.metadata?.lastSignInTime ? 'Primo accesso da completare' : '',
       enabled: settings.enabled === true, revision: settings.revision || 0,
+      lastAccessAt: c.millis(user.metadata?.lastSignInTime),
       lastSentAt: c.millis(settings.lastSentAt), lastChannel: settings.lastSentChannel || '',
       lastStatus: settings.lastStatus || '', lastQueuedAt: c.millis(settings.lastQueuedAt),
     };
@@ -88,6 +89,7 @@ function createService({ db, auth, scheduleRetry, logger = console }) {
         const data = doc.data();
         rows.push({ uid: doc.id, name: data.name || data.email || 'Utente non disponibile',
           email: data.email || '', available: false, reason: 'Account non disponibile',
+          lastAccessAt: 0,
           enabled: true, revision: data.revision || 0, lastSentAt: c.millis(data.lastSentAt),
           lastChannel: data.lastSentChannel || '', lastStatus: data.lastStatus || '' });
       }
@@ -143,10 +145,22 @@ function createService({ db, auth, scheduleRetry, logger = console }) {
     if (body.action === 'list') return listRecipients();
     if (body.action === 'status') return status();
     if (body.action === 'setRecipient') return setRecipient(actor, body);
+    if (body.action === 'sendSummary') {
+      if (typeof body.requestId !== 'string' || !/^[a-zA-Z0-9_-]{16,100}$/.test(body.requestId)) {
+        throw problem(400, 'Richiesta di invio non valida.');
+      }
+      const result = await queueNotice({
+        type: 'manual', key: 'MANUAL:' + actor.uid + ':' + body.requestId,
+        channel: 'RIEPILOGO', label: 'Riepilogo manuale', occurredAt: clock(), actorUid: actor.uid,
+      });
+      return { ...result, ...(await status()) };
+    }
     throw problem(400, 'Richiesta non valida.');
   }
 
   async function onNewWork(event, channel) {
+    // FBM arrives through the 08:00 schedule only, never per order.
+    if (channel !== 'FBA') return;
     const after = event.data?.after;
     const before = event.data?.before;
     if (!after?.exists) return;
@@ -157,8 +171,49 @@ function createService({ db, auth, scheduleRetry, logger = console }) {
     const work = c.newWork(before?.exists ? before.data() : null, after.data(), id, channel,
       occurredAt, activatedAt, c.millis(after.createTime));
     if (!work) return;
-    const eventId = c.hash(work.key);
-    const eventRef = db.doc(EVENTS + '/' + eventId);
+    return queueNotice({ type: 'fba', key: work.key, channel: 'FBA', label: work.label,
+      sourcePath: after.ref.path, sourceId: id, occurredAt });
+  }
+
+  async function onDaily(event) {
+    const slot = c.dailySlot(event.scheduleTime, clock());
+    if (!slot) return { outcome: 'outside_schedule' };
+    return queueNotice({ ...slot, type: 'daily', channel: 'RIEPILOGO', label: 'Riepilogo delle 08:00' });
+  }
+
+  async function readPendingSummary(transaction = null) {
+    const flows = db.collection('amzInventory/concamarise/logs');
+    // Legacy reservations and current flows can use different managed/status fields.
+    // Merge their IDs before counting; Shopify mirror logs are excluded by core.
+    const queries = [
+      flows.where('status', 'in', ['RESERVED', 'PARTIAL_PICKED', 'PRENOTATO', 'IN_ATTESA_PICKING']),
+      flows.where('reservation.active', '==', true),
+      flows.where('picking.managedByPicking', '==', true)
+        .select('kind', 'status', 'voided', 'cancelled', 'canceled', 'picking.flowPicked', 'picking.status'),
+      db.collection('shopifyFbmOrders').where('active', '==', true),
+    ];
+    const snapshots = await Promise.all(queries.map(query => transaction ? transaction.get(query) : query.get()));
+    const fba = new Map();
+    for (const snap of snapshots.slice(0, 2)) for (const doc of snap.docs) fba.set(doc.id, { id: doc.id, data: doc.data() });
+    // Most managed documents are history. Read only their tiny status projection;
+    // fetch full legacy documents only when they can still have pending lines.
+    const legacy = snapshots[2].docs.filter(doc => {
+      if (fba.has(doc.id)) return false;
+      const d = doc.data(), status = String(d.status || d.picking?.status || '').toUpperCase();
+      return String(d.kind || '').toLowerCase() === 'scarica' && !d.voided && !d.cancelled && !d.canceled &&
+        d.picking?.flowPicked !== true && !['PICKED', 'COMPLETED', 'CANCELLED', 'CANCELED', 'VOIDED'].includes(status);
+    });
+    for (let i = 0; i < legacy.length; i += 100) {
+      const refs = legacy.slice(i, i + 100).map(doc => doc.ref);
+      const docs = transaction ? await transaction.getAll(...refs) : await db.getAll(...refs);
+      for (const doc of docs) if (doc.exists) fba.set(doc.id, { id: doc.id, data: doc.data() });
+    }
+    return c.pendingTotals([...fba.values()], snapshots[3].docs.map(doc => ({ id: doc.id, data: doc.data() })));
+  }
+
+  async function queueNotice(notice) {
+    const { occurredAt, channel } = notice;
+    const eventId = c.hash(notice.key), eventRef = db.doc(EVENTS + '/' + eventId);
     const selected = await db.collection(RECIPIENTS).where('enabled', '==', true).get();
     const directory = selected.empty ? [] : await readDirectory();
     const authUsers = [];
@@ -168,32 +223,45 @@ function createService({ db, auth, scheduleRetry, logger = console }) {
     }
     const byUid = new Map(authUsers.map(user => [user.uid, user]));
     const candidates = selected.docs.filter(doc => c.selectedForEvent(doc.data(), byUid.get(doc.id), directory, occurredAt));
-    const now = Date.now();
-    await db.runTransaction(async tx => {
-      const refs = [eventRef, after.ref, ...candidates.map(s => s.ref)];
-      const [ledger, source, ...recipients] = await tx.getAll(...refs);
-      if (ledger.exists) return;
-      const current = channel === 'FBA' ? c.summarizeFba(source.data(), id) : c.summarizeFbm(source.data(), id);
-      const active = current && now - occurredAt < 24 * 60 * 60 * 1000;
+    const now = clock();
+    return db.runTransaction(async tx => {
+      const refs = [eventRef, db.doc(CONFIG), ...(notice.sourcePath ? [db.doc(notice.sourcePath)] : []),
+        ...candidates.map(s => s.ref)];
+      const [ledger, config, ...remaining] = await tx.getAll(...refs);
+      if (ledger.exists) return { queuedCount: (ledger.data().recipientUids || []).length,
+        totals: ledger.data().totals || null, alreadyQueued: true };
+      if (!config.exists || !config.data().activatedAt) throw problem(503, 'Servizio in attivazione.');
+      if (occurredAt < c.millis(config.data().activatedAt)) return { queuedCount: 0, outcome: 'before_activation' };
+      if (notice.type === 'manual' && now - c.millis(config.data().lastManualAt) < 60000) {
+        throw problem(429, 'Un riepilogo è già stato richiesto. Attendi un minuto.');
+      }
+      const source = notice.sourcePath ? remaining.shift() : null;
+      const current = source ? c.summarizeFba(source.data(), notice.sourceId) : null;
+      const active = (notice.type !== 'fba' || current) && now - occurredAt < 6 * 60 * 60 * 1000;
+      const recipients = remaining;
       const eligible = active ? recipients.filter((doc, i) => doc.exists &&
         doc.data().revision === candidates[i].data().revision &&
         c.selectedForEvent(doc.data(), byUid.get(doc.id), directory, occurredAt)) : [];
+      if (notice.type === 'manual' && !eligible.length) throw problem(400, 'Seleziona almeno un utente abilitato.');
+      const totals = eligible.length ? await readPendingSummary(tx) : null;
       const mailRefs = eligible.map(doc => db.doc('email/' + c.PREFIX + c.hash(eventId + ':' + doc.id)));
       const existing = mailRefs.length ? await tx.getAll(...mailRefs) : [];
       if (existing.some(doc => doc.exists)) throw problem(500, 'Collisione nella coda email.');
-      const message = c.buildMessage(current || work);
+      const message = totals ? c.buildMessage({ ...notice, totals, generatedAt: now }) : null;
       for (let i = 0; i < eligible.length; i++) {
         const recipient = eligible[i], data = recipient.data(), mailRef = mailRefs[i];
         const mail = {
           to: data.email, from: 'Picking <info@generalcoppersrl.com>', replyTo: 'info@generalcoppersrl.com',
           message, kind: c.KIND,
-          picking: { uid: recipient.id, eventId, channel, label: work.label, sourcePath: after.ref.path },
+          picking: { uid: recipient.id, eventId, channel, label: notice.label,
+            sourcePath: notice.sourcePath || '', noticeType: notice.type },
           createdAt: FieldValue.serverTimestamp(),
         };
         tx.create(mailRef, mail);
         tx.create(db.doc(DELIVERIES + '/' + mailRef.id), {
           uid: recipient.id, email: data.email, recipientRevision: data.revision, eventId,
-          channel, label: work.label, sourcePath: after.ref.path, sourceId: id,
+          channel, label: notice.label, sourcePath: notice.sourcePath || '', sourceId: notice.sourceId || '',
+          noticeType: notice.type,
           occurredAt: Timestamp.fromMillis(occurredAt), createdAt: FieldValue.serverTimestamp(),
           envelopeHash: c.envelopeHash(mail), lastStatus: 'PENDING',
         });
@@ -202,10 +270,13 @@ function createService({ db, auth, scheduleRetry, logger = console }) {
             lastMailId: mailRef.id, lastStatus: 'PENDING' }, { merge: true });
         }
       }
-      tx.create(eventRef, { key: work.key, channel, sourcePath: after.ref.path,
+      tx.create(eventRef, { key: notice.key, channel, sourcePath: notice.sourcePath || '',
+        noticeType: notice.type, totals, ...(notice.actorUid ? { actorUid: notice.actorUid } : {}),
         occurredAt: Timestamp.fromMillis(occurredAt), processedAt: FieldValue.serverTimestamp(),
         recipientUids: eligible.map(doc => doc.id), outcome: !active ? 'no_longer_pending' :
           eligible.length ? 'queued' : 'no_selected_recipients' });
+      if (notice.type === 'manual') tx.update(db.doc(CONFIG), { lastManualAt: FieldValue.serverTimestamp() });
+      return { queuedCount: eligible.length, totals, alreadyQueued: false };
     });
   }
 
@@ -262,12 +333,16 @@ function createService({ db, auth, scheduleRetry, logger = console }) {
     const directory = user ? await readDirectory() : [];
     const mailRef = db.doc('email/' + mailId), recipientRef = db.doc(RECIPIENTS + '/' + data.uid);
     await db.runTransaction(async tx => {
-      const [mailSnap, recipient, source] = await tx.getAll(mailRef, recipientRef, db.doc(data.sourcePath));
+      const [mailSnap, recipient, source] = await tx.getAll(mailRef, recipientRef,
+        ...(data.sourcePath ? [db.doc(data.sourcePath)] : []));
       if (!mailSnap.exists || !recipient.exists) return;
       const mail = mailSnap.data(), prefs = recipient.data();
       if (c.envelopeHash(mail) !== data.envelopeHash || !c.retryDelay(mail.delivery) ||
           Math.max(1, c.number(mail.delivery.attempts)) !== attempt) return;
-      const pending = data.channel === 'FBA' ? c.summarizeFba(source.data(), data.sourceId) : c.summarizeFbm(source.data(), data.sourceId);
+      const recent = clock() - c.millis(data.occurredAt) < 6 * 60 * 60 * 1000;
+      const summary = ['manual', 'daily'].includes(data.noticeType);
+      // Old per-order FBM messages are not retried after the schedule migration.
+      const pending = recent && (summary || (data.channel === 'FBA' && c.summarizeFba(source?.data(), data.sourceId)));
       if (!pending || prefs.revision !== data.recipientRevision ||
           !c.selectedForEvent(prefs, user, directory, c.millis(data.occurredAt))) {
         tx.set(ledgerRef, { lastStatus: 'CANCELLED' }, { merge: true });
@@ -280,7 +355,7 @@ function createService({ db, auth, scheduleRetry, logger = console }) {
     });
   }
 
-  return { api, onNewWork, onDelivery, retryEmail, listRecipients, verifyAdmin };
+  return { api, onNewWork, onDaily, onDelivery, retryEmail, listRecipients, verifyAdmin, readPendingSummary };
 }
 
 module.exports = { createService, CONFIG, RECIPIENTS, EVENTS, DELIVERIES };

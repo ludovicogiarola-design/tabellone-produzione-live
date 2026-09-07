@@ -5,9 +5,10 @@ const { getAuth } = require('firebase-admin/auth');
 const { getFirestore } = require('firebase-admin/firestore');
 const { onRequest } = require('firebase-functions/v2/https');
 const { onDocumentWritten } = require('firebase-functions/v2/firestore');
+const { onSchedule } = require('firebase-functions/v2/scheduler');
 const logger = require('firebase-functions/logger');
 const { createService } = require('./service');
-const { PROJECT, REGION } = require('./core');
+const { PROJECT, REGION, TIME_ZONE } = require('./core');
 
 initializeApp({ projectId: PROJECT });
 const service = createService({
@@ -48,9 +49,10 @@ exports.pickingEmailFba = onDocumentWritten({
   ...runtime, document: 'amzInventory/concamarise/logs/{flowId}', retry: true, timeoutSeconds: 120,
 }, event => service.onNewWork(event, 'FBA'));
 
-exports.pickingEmailFbm = onDocumentWritten({
-  ...runtime, document: 'shopifyFbmOrders/{orderId}', retry: true, timeoutSeconds: 120,
-}, event => service.onNewWork(event, 'FBM'));
+exports.pickingEmailFbmMorning = onSchedule({
+  ...runtime, schedule: '0 8 * * *', timeZone: TIME_ZONE, timeoutSeconds: 180,
+  retryCount: 3, minBackoffSeconds: 60, maxBackoffSeconds: 300, maxRetrySeconds: 3600,
+}, event => service.onDaily(event));
 
 exports.pickingEmailDelivery = onDocumentWritten({
   ...runtime, document: 'email/{mailId}', retry: true, timeoutSeconds: 420,
