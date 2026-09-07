@@ -271,6 +271,7 @@
 }
 
 </style>
+<link rel="stylesheet" href="./picking-notifications.css?v=20260907">
 </head>
 
 <body>
@@ -408,6 +409,12 @@
         <span class="pickingNavLabel">Storico prelievi</span>
         <span class="pickingNavCount" id="pickingHistoryNavCount">—</span>
       </button>
+      <button class="pickingNavBtn" id="btnPickingNotifications" type="button" data-picking-view="notifications" aria-controls="homePickingNotificationsBox" aria-pressed="false" style="display:none">
+        <span class="pickingNavIcon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg>
+        </span>
+        <span class="pickingNavLabel">Notifiche</span>
+      </button>
       <button class="pickingNavBtn" id="btnPickingDroneMode" type="button" data-picking-view="droneMode" aria-controls="homeDroneModeBox" aria-pressed="false">
         <span class="pickingNavIcon" aria-hidden="true">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4-7 4-7-4 7-4Z"/><path d="M5 7v6l7 4 7-4V7"/><path d="M12 11v6"/><path d="M8.5 14.5l-3 1.7"/><path d="M15.5 14.5l3 1.7"/></svg>
@@ -528,6 +535,19 @@
             </div>
             <div class="gridTable" id="homePickedHistoryList" style="margin-top:12px;"></div>
             <div class="hint" id="homePickedHistoryHint" style="margin-top:10px"></div>
+          </div>
+
+          <div class="miniCard pickingSection" id="homePickingNotificationsBox" aria-hidden="true">
+            <div class="miniTop">
+              <div>
+                <div class="miniTitle">Notifiche email</div>
+                <p class="pickingMailIntro">Seleziona chi deve ricevere gli avvisi per i nuovi FBA e FBM.</p>
+              </div>
+              <button class="btn small" type="button" data-mail-refresh>Aggiorna</button>
+            </div>
+            <div class="pickingMailHead"><span>Destinatario</span><span>Ultima email inviata</span></div>
+            <div data-mail-list></div>
+            <div class="pickingMailFeedback" role="status" aria-live="polite" data-mail-status></div>
           </div>
 
           <!-- Drone Mode viene aperto come shell fullscreen esterna alla UI Picking. -->
@@ -3817,6 +3837,7 @@ function readRackPickerSelection(root){
             state.authGateState = "signed_in";
             state.authGateMessage = "";
             await resolveUserRole(user);
+            syncPickingMailAuth();
             syncHeaderSub();
 
             if(state.user.isWhitelisted){
@@ -3824,6 +3845,8 @@ function readRackPickerSelection(root){
               startAllRealtime();
               setView("home");
               checkStartupDataGate("auth_ready");
+              const mailView = new URLSearchParams(location.search).get("picking");
+              if(mailView === "fba" || mailView === "fbm") setPickingHomeView(mailView === "fba" ? "pickingFba" : "pickingFbm");
             }else{
               cancelStartupDataGate();
               stopAllRealtime();
@@ -3837,6 +3860,7 @@ function readRackPickerSelection(root){
 
           const finalizeSignedOut = ()=>{
             state.user = null;
+            syncPickingMailAuth();
             cancelStartupDataGate();
             stopAllRealtime();
             state.authGateState = "signed_out";
@@ -7349,10 +7373,48 @@ function readRackPickerSelection(root){
       }
     }
 
+    let _pickingMailUi = null;
+    let _pickingMailLoading = null;
+    let _pickingMailAuthUid = "";
+
+    function syncPickingMailAuth(){
+      const uid = state.user?.uid || "";
+      if(uid !== _pickingMailAuthUid || !state.user?.isAdmin){
+        _pickingMailUi?.reset();
+        _pickingMailAuthUid = uid;
+      }
+      const btn = $("btnPickingNotifications");
+      if(btn) btn.style.display = state.user?.isAdmin ? "" : "none";
+      if(!state.user?.isAdmin && state.ui?.pickingHomeView === "notifications"){
+        state.ui.pickingHomeView = "noLocation";
+        syncPickingHomeView();
+      }
+    }
+
+    async function openPickingMail(){
+      if(!state.user?.isAdmin || pickingHomeView() !== "notifications") return;
+      try{
+        if(!_pickingMailLoading) _pickingMailLoading = import("./picking-notifications.js?v=20260907");
+        const mod = await _pickingMailLoading;
+        if(!state.user?.isAdmin || pickingHomeView() !== "notifications") return;
+        if(!_pickingMailUi) _pickingMailUi = mod.createPickingNotifications({
+          root: $("homePickingNotificationsBox"),
+          getUser: () => state.firebase.auth?.currentUser,
+          isActive: () => !!state.user?.isAdmin && pickingHomeView() === "notifications"
+        });
+        _pickingMailUi.open();
+      }catch(err){
+        _pickingMailLoading = null;
+        const feedback = $("homePickingNotificationsBox")?.querySelector("[data-mail-status]");
+        if(feedback) feedback.textContent = "Impossibile caricare le notifiche. Riapri la sezione.";
+        console.warn("picking email interface", err);
+      }
+    }
+
     function pickingHomeView(){
       const v = state.ui?.pickingHomeView || "noLocation";
       if(v === "picking") return "pickingFbm"; // compatibilità con vecchia voce unica
-      return (v === "located" || v === "pickingFbm" || v === "pickingFba" || v === "pickingHistory") ? v : "noLocation";
+      return (v === "located" || v === "pickingFbm" || v === "pickingFba" || v === "pickingHistory" || (v === "notifications" && state.user?.isAdmin)) ? v : "noLocation";
     }
 
     
@@ -7657,6 +7719,7 @@ function readRackPickerSelection(root){
         { key:"located", box:"homeLocatedBox", active:view === "located" },
         { key:"picking", box:"homePickingBox", active:pickingActive },
         { key:"pickingHistory", box:"homePickingHistoryBox", active:view === "pickingHistory" },
+        { key:"notifications", box:"homePickingNotificationsBox", active:view === "notifications" },
       ];
       const buttons = [
         { key:"noLocation", btn:"btnPickingNoLocation" },
@@ -7664,6 +7727,7 @@ function readRackPickerSelection(root){
         { key:"pickingFbm", btn:"btnPickingFlowFbm" },
         { key:"pickingFba", btn:"btnPickingFlowFba" },
         { key:"pickingHistory", btn:"btnPickingHistory" },
+        { key:"notifications", btn:"btnPickingNotifications" },
       ];
 
       for(const d of sections){
@@ -7698,7 +7762,9 @@ function readRackPickerSelection(root){
         void openDroneModeFullscreen();
         return;
       }
-      state.ui.pickingHomeView = (next === "located" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory") ? next : "noLocation";
+      state.ui.pickingHomeView = (next === "located" || next === "pickingFbm" || next === "pickingFba" || next === "pickingHistory" || (next === "notifications" && state.user?.isAdmin)) ? next : "noLocation";
+      if(state.ui.pickingHomeView === "notifications") void openPickingMail();
+      else _pickingMailUi?.close();
       const needsFlowLogs = (state.ui.pickingHomeView === "pickingFba" || state.ui.pickingHomeView === "pickingHistory");
       if(state.ui.pickingHomeView === "pickingFbm"){
         // FBM: widget SKU immediati da inventario; lista ordini caricata dai flussi Shopify FBM quando si apre la sezione.
