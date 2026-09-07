@@ -181,7 +181,7 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
     return queueNotice({ ...slot, type: 'daily', channel: 'RIEPILOGO', label: 'Riepilogo delle 08:00' });
   }
 
-  async function readPendingSummary(transaction = null) {
+  async function readPendingSummary(transaction = null, detailed = false) {
     const flows = db.collection('amzInventory/concamarise/logs');
     // Legacy reservations and current flows can use different managed/status fields.
     // Merge their IDs before counting; Shopify mirror logs are excluded by core.
@@ -208,7 +208,24 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
       const docs = transaction ? await transaction.getAll(...refs) : await db.getAll(...refs);
       for (const doc of docs) if (doc.exists) fba.set(doc.id, { id: doc.id, data: doc.data() });
     }
-    return c.pendingTotals([...fba.values()], snapshots[3].docs.map(doc => ({ id: doc.id, data: doc.data() })));
+    const details = c.pendingDetails([...fba.values()], snapshots[3].docs.map(doc => ({ id: doc.id, data: doc.data() })));
+    if (!detailed) return { fba: details.fba.orderCount, fbm: details.fbm.orderCount };
+    // Names normally come from the order itself. Missing legacy names can be
+    // resolved from the physical inventory, without reading customer information.
+    const products = [...details.fba.products, ...details.fbm.products];
+    const missing = [...new Set(products.filter(p => !p.title && p.sku && !p.sku.includes('/') &&
+      !['.', '..'].includes(p.sku)).map(p => p.sku))];
+    const titles = new Map();
+    for (let i = 0; i < missing.length; i += 100) {
+      const refs = missing.slice(i, i + 100).map(sku => db.doc('amzInventory/concamarise/items/' + sku));
+      const docs = transaction ? await transaction.getAll(...refs) : await db.getAll(...refs);
+      for (const doc of docs) {
+        const data = doc.data();
+        if (data && c.skuKey(data.sku || doc.id) === doc.id) titles.set(doc.id, c.productTitle(data.title || data.name));
+      }
+    }
+    for (const product of products) if (!product.title) product.title = titles.get(product.sku) || '';
+    return details;
   }
 
   async function queueNotice(notice) {
@@ -229,7 +246,7 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
         ...candidates.map(s => s.ref)];
       const [ledger, config, ...remaining] = await tx.getAll(...refs);
       if (ledger.exists) return { queuedCount: (ledger.data().recipientUids || []).length,
-        totals: ledger.data().totals || null, alreadyQueued: true };
+        totals: ledger.data().totals || null, summaryCounts: ledger.data().summaryCounts || null, alreadyQueued: true };
       if (!config.exists || !config.data().activatedAt) throw problem(503, 'Servizio in attivazione.');
       if (occurredAt < c.millis(config.data().activatedAt)) return { queuedCount: 0, outcome: 'before_activation' };
       if (notice.type === 'manual' && now - c.millis(config.data().lastManualAt) < 60000) {
@@ -243,15 +260,18 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
         doc.data().revision === candidates[i].data().revision &&
         c.selectedForEvent(doc.data(), byUid.get(doc.id), directory, occurredAt)) : [];
       if (notice.type === 'manual' && !eligible.length) throw problem(400, 'Seleziona almeno un utente abilitato.');
-      const totals = eligible.length ? await readPendingSummary(tx) : null;
+      const details = eligible.length ? await readPendingSummary(tx, true) : null;
+      const totals = details ? { fba: details.fba.orderCount, fbm: details.fbm.orderCount } : null;
+      const summaryCounts = details ? { fbaPieces: details.fba.totalQty, fbaProducts: details.fba.skuCount,
+        fbmOrders: details.fbm.orderCount, fbmPieces: details.fbm.totalQty, fbmProducts: details.fbm.skuCount } : null;
       const mailRefs = eligible.map(doc => db.doc('email/' + c.PREFIX + c.hash(eventId + ':' + doc.id)));
       const existing = mailRefs.length ? await tx.getAll(...mailRefs) : [];
       if (existing.some(doc => doc.exists)) throw problem(500, 'Collisione nella coda email.');
-      const message = totals ? c.buildMessage({ ...notice, totals, generatedAt: now }) : null;
+      const message = details ? c.buildMessage({ ...notice, details, generatedAt: now }) : null;
       for (let i = 0; i < eligible.length; i++) {
         const recipient = eligible[i], data = recipient.data(), mailRef = mailRefs[i];
         const mail = {
-          to: data.email, from: 'Picking <info@generalcoppersrl.com>', replyTo: 'info@generalcoppersrl.com',
+          to: data.email, from: c.MAIL_FROM, replyTo: 'info@generalcoppersrl.com',
           message, kind: c.KIND,
           picking: { uid: recipient.id, eventId, channel, label: notice.label,
             sourcePath: notice.sourcePath || '', noticeType: notice.type },
@@ -271,12 +291,12 @@ function createService({ db, auth, scheduleRetry, logger = console, clock = Date
         }
       }
       tx.create(eventRef, { key: notice.key, channel, sourcePath: notice.sourcePath || '',
-        noticeType: notice.type, totals, ...(notice.actorUid ? { actorUid: notice.actorUid } : {}),
+        noticeType: notice.type, totals, summaryCounts, ...(notice.actorUid ? { actorUid: notice.actorUid } : {}),
         occurredAt: Timestamp.fromMillis(occurredAt), processedAt: FieldValue.serverTimestamp(),
         recipientUids: eligible.map(doc => doc.id), outcome: !active ? 'no_longer_pending' :
           eligible.length ? 'queued' : 'no_selected_recipients' });
       if (notice.type === 'manual') tx.update(db.doc(CONFIG), { lastManualAt: FieldValue.serverTimestamp() });
-      return { queuedCount: eligible.length, totals, alreadyQueued: false };
+      return { queuedCount: eligible.length, totals, summaryCounts, alreadyQueued: false };
     });
   }
 

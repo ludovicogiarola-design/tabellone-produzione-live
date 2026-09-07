@@ -53,17 +53,65 @@ test('Worker membership does not confer administrator access', () => {
     admin: true, role: 'admin', userRole: 'administrator', roles: ['admin'] } }]).admin, false);
   assert.equal(c.accessFor(user, [{ id: 'worker', data: { enabled: true, isAdmin: true } }]).admin, true);
 });
-test('HTML mail matches Picking green/grey, escapes labels and contains only useful counts', () => {
-  const message = c.buildMessage({ type: 'fba', label: 'FBA <script>alert(1)</script>\r\nUnsafe', totals: { fba: 2, fbm: 12 } });
+test('Operational email details products, pieces, urgency, location and procedure in Picking colours', () => {
+  const details = c.pendingDetails([{ id: 'fba', data: fba({ workflowLabel: 'ID flusso di lavoro: private-uuid',
+    workflow: { shipments: [{ code: 'FBA15TEST' }] }, lines: [
+      { sku: 'NEEM500', title: 'Bionee Neem 500 ml – Prodotto naturale SKU: NEEM500 ASIN: PRIVATE', qty: 24 },
+      { sku: 'SOAP', title: 'Sapone <script>alert(1)</script>', qty: 60 },
+    ] }) }], [{ id: 'fbm', data: fbm() }]);
+  const message = c.buildMessage({ type: 'fba', label: 'FBA15TEST', details });
   assert.ok(!/[\r\n]/.test(message.subject));
   assert.ok(message.text.includes('?picking=fba'));
-  assert.ok(message.text.includes('2 flussi FBA da evadere'));
-  assert.ok(message.text.includes('12 ordini FBM da evadere'));
-  assert.ok(message.html.includes('#0f7078') && message.html.includes('#f6f7f9'));
+  assert.ok(message.subject.includes('FBA URGENTE: 84 pezzi / 2 prodotti'));
+  assert.ok(message.subject.includes('NEEM500') && message.subject.includes('24 pz'));
+  assert.ok(message.subject.includes('FBM: 1 ordine / 2 pezzi'));
+  assert.ok(message.text.includes('Totale FBA: 84 pezzi · 2 prodotti'));
+  assert.ok(message.text.includes('Stabilimento LG Trading SRL di Concamarise'));
+  assert.ok(message.text.includes('Registrare in Picking i prelievi completati.'));
+  assert.ok(message.html.includes('Amazon in arrivo per il carico'));
+  assert.ok(message.html.includes('FBA15TEST'));
+  assert.ok(!message.html.includes('flusso') && !message.html.includes('private-uuid'));
+  assert.ok(!message.html.includes('ASIN: PRIVATE'));
+  assert.ok(message.html.includes('#0f7078') && message.html.includes('#003c41'));
   assert.ok(message.html.includes('&lt;script&gt;'));
   assert.ok(!message.html.includes('<script>') && !message.html.includes('#f97316'));
-  assert.ok(c.buildMessage({ type: 'daily', totals: { fba: 0, fbm: 0 } }).html.includes('Riepilogo delle 08:00'));
-  assert.ok(c.buildMessage({ totals: { fba: 1, fbm: 2 } }).text.includes('?picking=fbm'));
+  assert.ok(message.html.includes('Procedura da seguire'));
+});
+test('Product aggregation totals pieces and preserves per-order allocations without duplicate documents', () => {
+  const details = c.pendingDetails([
+    { id: 'one', data: fba({ workflow: { shipments: [{ code: 'FBAFIRST' }] }, lines: [{ sku: ' sku-1 ', title: 'Prodotto 1 kg', qty: 4 }] }) },
+    { id: 'two', data: fba({ workflow: { shipments: [{ code: 'FBASECOND' }] }, lines: [{ sku: 'SKU-1', title: 'Prodotto 1 kg', qty: 6 }] }) },
+  ], [
+    { id: 'one', data: fbm({ shopifyUpdatedAtClient: 100 }) },
+    { id: 'duplicate', data: fbm({ shopifyUpdatedAtClient: 200, linesByLineId: { a: { sku: 'SKU-1', title: 'Prodotto 1 kg', reservedQty: 7, shippedQty: 2 } } }) },
+  ]);
+  assert.equal(details.fba.totalQty, 10);
+  assert.equal(details.fba.skuCount, 1);
+  assert.deepEqual(details.fba.products[0].references, [{ label: 'FBAFIRST', qty: 4 }, { label: 'FBASECOND', qty: 6 }]);
+  assert.equal(details.fbm.totalQty, 5);
+  assert.equal(details.fbm.orderCount, 1);
+  assert.ok(c.buildMessage({ details }).text.includes('FBASECOND: 6 pezzi'));
+});
+test('Long product lists remain complete in the email with an explicitly bounded subject', () => {
+  const lines = Array.from({ length: 160 }, (_, i) => ({ sku: 'SKU-' + i,
+    title: 'Prodotto numero ' + i + ' – Descrizione completa da mantenere nella mail', qty: i + 1 }));
+  const details = c.pendingDetails([{ id: 'f', data: fba({ lines }) }], []);
+  const message = c.buildMessage({ details });
+  assert.ok(Buffer.byteLength(message.subject, 'utf8') < 900);
+  assert.ok(message.subject.includes('prodotti: dettagli nella mail'));
+  for (const line of lines) {
+    assert.ok(message.html.includes('SKU: ' + line.sku + '</div>'));
+    assert.ok(message.text.includes('SKU: ' + line.sku + ' | ' + line.qty + ' pezzi'));
+  }
+});
+test('No FBA means no Amazon arrival claim; an empty digest does not request unnecessary work', () => {
+  const onlyFbm = c.buildMessage({ type: 'daily', details: c.pendingDetails([], [{ id: 'o', data: fbm() }]) });
+  assert.ok(onlyFbm.html.includes('ORE 08:00'));
+  assert.ok(!onlyFbm.html.includes('Amazon in arrivo'));
+  const empty = c.buildMessage({ details: c.pendingDetails([], []) });
+  assert.ok(empty.subject.includes('Nessun prodotto da preparare'));
+  assert.ok(!empty.html.includes('Procedura da seguire'));
+  assert.ok(!empty.text.includes('Amazon in arrivo'));
 });
 test('Pending totals deduplicate orders and exclude shipped, picked, cancelled and FBM mirror logs', () => {
   const orders = [{ id: '1', data: fbm() }, { id: 'duplicate', data: fbm() },

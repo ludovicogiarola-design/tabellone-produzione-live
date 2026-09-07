@@ -13,10 +13,20 @@ Ultimo accesso indica lastSignInTime, cioè l'ultima autenticazione dell'account
 - FBM: riepilogo ogni giorno alle 08:00 Europe/Rome, con cambio automatico
   tra ora solare e legale. Nessun invio all'arrivo del singolo ordine FBM.
 - Invia riepilogo: invio manuale ai soli utenti spuntati, con totali aggiornati
-  di flussi FBA e ordini FBM ancora da evadere. Si può inviare anche con zero
+  dei pezzi e prodotti FBA e degli ordini e pezzi FBM ancora da evadere. Si può inviare anche con zero
   ordini. Il riepilogo giornaliero mostra entrambi i totali, anche se sono zero.
 - Le email usano HTML e testo semplice. Grafica Picking verde #0f7078 e grigia,
-  due totali e pulsante Apri Picking; il nuovo FBA include il suo riferimento.
+  con un avviso operativo e la procedura per lo stabilimento LG Trading SRL di
+  Concamarise. Se ci sono prodotti FBA, l'avviso richiede preparazione prioritaria
+  per il carico Amazon, senza inventare una data o un orario di ritiro.
+- Il mittente visualizzato è LG Trading SRL - Picking Concamarise. L'oggetto
+  riporta totali, nomi sintetici dei prodotti, SKU e quantità. Per liste molto
+  lunghe indica esplicitamente quanti prodotti proseguono nel corpo della mail.
+  HTML e testo riportano sempre tutti i prodotti, i riferimenti di spedizione
+  Amazon o di ordine FBM e le quantità assegnate a ciascuno. Il totale FBA
+  distingue pezzi da preparare e prodotti distinti (SKU), senza contare i flussi.
+- I titoli provengono dall'ordine; per vecchie righe senza nome viene consultato
+  il catalogo fisico di Concamarise. Non vengono inclusi dati dei clienti.
 - I conteggi leggono le fonti operative in una transazione. Escludono annullati,
   completati, prelevati e duplicati dei log Shopify. Per FBM si sottrae il
   maggiore tra shippedQty e inventoryAppliedQty; righe già azzerate non vengono
@@ -40,6 +50,8 @@ I destinatari vengono sempre ricavati sul server, mai dal payload del browser.
 
 L'ultimo invio viene aggiornato solo dopo SUCCESS, accettazione SMTP dell'email
 prevista e delivery.endTime. Non indica la lettura da parte del lavoratore.
+Non sono presenti tracking delle aperture, pulsanti di conferma lettura o
+richieste di risposta. I collegamenti Apri Picking aprono soltanto l'applicazione.
 Per errori SMTP temporanei espliciti sono consentiti tre tentativi totali,
 con attesa di 60 e poi 300 secondi nella funzione Eventarc esistente.
 Esiti ambigui dopo DATA non vengono ritentati, per evitare invii duplicati.
@@ -57,12 +69,12 @@ Le esecuzioni fuori orario o troppo vecchie vengono ignorate. Il destinatario
 deve essere già selezionato all'ora prevista; non vengono inviati arretrati.
 
 Il timestamp activatedAt in pickingEmailConfig/system è preservato.
-Per aggiornare questo solo codebase e rimuovere il vecchio trigger per ordine:
+Per aggiornare questo solo codebase:
 
-    firebase deploy --only functions:picking-notifications --project tabellone-produzione-liv-e313e --non-interactive --force
+    firebase deploy --only functions:picking-notifications --project tabellone-produzione-liv-e313e --non-interactive
 
 Funzioni finali: pickingEmailApi, pickingEmailFba, pickingEmailDelivery,
-pickingEmailFbmMorning. pickingEmailFbm viene eliminata come richiesto.
+pickingEmailFbmMorning. Il vecchio trigger pickingEmailFbm è già stato rimosso.
 Hosting viene pubblicato dal workflow esistente dopo un unico push su main.
 
 ## Verifica
@@ -74,5 +86,6 @@ Con Firestore Emulator attivo esclusivamente su 127.0.0.1:8791:
     FIRESTORE_EMULATOR_HOST=127.0.0.1:8791 npm test
 
 I test di integrazione usano solo demo-picking-email-tests. Coprono selezione,
-accessi, riepiloghi manuali, deduplicazione, orario italiano, retry e ultimo
-invio confermato. Nessuna email di prova viene spedita ai lavoratori.
+accessi, riepiloghi manuali, conteggi e dettaglio prodotti, deduplicazione,
+orario italiano, retry e ultimo invio confermato. Nessuna email di prova viene
+spedita ai lavoratori.

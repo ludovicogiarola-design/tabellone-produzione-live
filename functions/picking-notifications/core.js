@@ -1,17 +1,31 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
+const { renderMessage } = require('./mail-template');
 const PROJECT = 'tabellone-produzione-liv-e313e';
 const REGION = 'europe-west1';
 const URL = 'https://' + PROJECT + '.web.app/picking.html';
 const PREFIX = 'picking_email_';
 const KIND = 'picking_new_work_v1';
 const TIME_ZONE = 'Europe/Rome';
+const MAIL_FROM = 'LG Trading SRL - Picking Concamarise <info@generalcoppersrl.com>';
 const OWNER_EMAILS = new Set(['ludovico@generalcoppersrl.com', 'ludovicogiarola@gmail.com']);
 const clean = (value, max = 180) => String(value ?? '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, max);
 const email = value => clean(value, 254).toLowerCase();
 const hash = value => createHash('sha256').update(String(value)).digest('hex');
 const validEmail = value => /^[^\s<>,;@]+@[^\s<>,;@]+\.[^\s<>,;@]+$/.test(String(value || ''));
+const skuKey = value => clean(value).replace(/\s+/g, ' ').toUpperCase();
+const productTitle = value => clean(value, 600).split(/\s+(?:SKU\s*:|ASIN\s*:|Tipo di stoccaggio\b)/i)[0].trim();
+
+function fbaReference(data) {
+  const codes = [...new Set([data.shipmentCode, data.shipmentId, data.fbaShipmentId,
+    ...(Array.isArray(data.workflow?.shipments) ? data.workflow.shipments.map(s => s.code || s.shipmentId || s.id) : [])]
+    .map(value => clean(value, 80)).filter(Boolean))];
+  if (codes.length) return codes.join(' / ');
+  const label = clean(data.workflowLabel || data.workflow?.label || data.fileName, 140);
+  // The worker needs the Amazon shipment reference, never an internal workflow UUID.
+  return label && !/\bfluss[oi]\b|\bworkflow\b|^wf[0-9a-f-]+$/i.test(label) ? label : 'Preparazione FBA';
+}
 const millis = value => {
   if (value?.toMillis) return value.toMillis();
   if (value instanceof Date) return value.getTime();
@@ -80,8 +94,9 @@ function summarizeFba(data, id) {
   });
   if (!lines.length) return null;
   return {
-    channel: 'FBA', key: 'FBA:' + id, label: clean(data.workflowLabel || data.workflow?.label || data.fileName || id, 140),
-    lines: lines.map(line => ({ sku: clean(line.sku), qty: number(line.qty) })),
+    channel: 'FBA', key: 'FBA:' + id, label: fbaReference(data),
+    lines: lines.map(line => ({ sku: skuKey(line.sku), title: productTitle(line.title || line.productName || line.name), qty: number(line.qty) })),
+    updatedAt: millis(data.updatedAtClient || data.updatedAt || data.appliedAtClient || data.appliedAt),
     businessCreatedAt: millis(data.appliedAtClient || data.createdAtClient || data.createdAt),
   };
 }
@@ -90,19 +105,24 @@ function summarizeFbm(data, id) {
   if (!data || data.active !== true || data.cancelled || data.canceled || data.cancelledAt || data.canceledAt || data.voided) return null;
   if (String(data.fulfillmentStatus || data.fulfillment_status || '').toLowerCase() === 'fulfilled') return null;
   const stored = Object.values(data.linesByLineId || {});
+  const details = Array.isArray(data.orderDetails?.lineItems) ? data.orderDetails.lineItems : [];
+  const byId = new Map(details.map(line => [String(line.lineItemId || line.id || ''), line]));
+  const bySku = new Map(details.map(line => [skuKey(line.sku), line]));
   const lines = stored.length ? stored.map(line => ({
-    sku: clean(line?.sku),
+    sku: skuKey(line?.sku),
+    title: productTitle(line?.title || byId.get(String(line?.lineItemId || ''))?.title || bySku.get(skuKey(line?.sku))?.title),
     qty: Math.max(0, number(line?.reservedQty) - Math.max(number(line?.shippedQty), number(line?.inventoryAppliedQty))),
   })).filter(line => line.sku && line.qty > 0) :
-    (Array.isArray(data.orderDetails?.lineItems) ? data.orderDetails.lineItems : [])
+    details
       .filter(line => line?.requiresShipping !== false && line?.giftCard !== true)
-      .map(line => ({ sku: clean(line.sku),
+      .map(line => ({ sku: skuKey(line.sku), title: productTitle(line.title),
         qty: number(line.fulfillableQuantity ?? line.currentQuantity ?? line.quantity) }))
       .filter(line => line.sku && line.qty > 0);
   if (!lines.length) return null;
   return {
     channel: 'FBM', key: 'FBM:' + clean(data.orderId || id).replace(/^gid:\/\/shopify\/Order\//, ''),
-    label: clean(data.orderName || data.orderId || id, 140), lines,
+    label: clean(data.orderName || data.orderId || id, 140).replace(/^#+/, '#'), lines,
+    updatedAt: millis(data.shopifyUpdatedAtClient || data.updatedAtClient || data.updatedAt),
     businessCreatedAt: millis(data.shopifyCreatedAtClient || data.createdAtClient || data.createdAt),
   };
 }
@@ -123,16 +143,36 @@ function selectedForEvent(recipient, user, directory, occurredAt) {
 }
 
 function pendingTotals(fbaDocs, fbmDocs) {
-  const fba = new Set(), fbm = new Set();
-  for (const doc of fbaDocs) {
-    const work = summarizeFba(doc.data, doc.id);
-    if (work) fba.add(work.key);
+  const detail = pendingDetails(fbaDocs, fbmDocs);
+  return { fba: detail.fba.orderCount, fbm: detail.fbm.orderCount };
+}
+
+function pendingDetails(fbaDocs, fbmDocs) {
+  function group(docs, summarize) {
+    const orders = new Map();
+    for (const doc of [...docs].sort((a, b) => String(a.id).localeCompare(String(b.id)))) {
+      const work = summarize(doc.data, doc.id);
+      if (!work) continue;
+      const previous = orders.get(work.key);
+      if (!previous || work.updatedAt > previous.updatedAt) orders.set(work.key, work);
+    }
+    const products = new Map();
+    for (const work of orders.values()) for (const line of work.lines) {
+      const sku = skuKey(line.sku);
+      const product = products.get(sku) || { sku, title: '', qty: 0, references: new Map() };
+      if (!product.title && line.title) product.title = line.title;
+      product.qty += line.qty;
+      const reference = product.references.get(work.key) || { label: work.label, qty: 0 };
+      reference.qty += line.qty;
+      product.references.set(work.key, reference);
+      products.set(sku, product);
+    }
+    const rows = [...products.values()].map(p => ({ ...p, references: [...p.references.values()] }))
+      .sort((a, b) => b.qty - a.qty || a.sku.localeCompare(b.sku));
+    return { products: rows, totalQty: rows.reduce((n, p) => n + p.qty, 0),
+      skuCount: rows.length, orderCount: orders.size };
   }
-  for (const doc of fbmDocs) {
-    const work = summarizeFbm(doc.data, doc.id);
-    if (work) fbm.add(work.key);
-  }
-  return { fba: fba.size, fbm: fbm.size };
+  return { fba: group(fbaDocs, summarizeFba), fbm: group(fbmDocs, summarizeFbm) };
 }
 
 function dailySlot(scheduleTime, now = Date.now()) {
@@ -146,36 +186,8 @@ function dailySlot(scheduleTime, now = Date.now()) {
   return { key: 'DAILY_FBM:' + parts.year + '-' + parts.month + '-' + parts.day, occurredAt: time };
 }
 
-const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g,
-  char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
-
-function buildMessage({ type = 'manual', label = '', totals, generatedAt = Date.now() }) {
-  const fba = number(totals.fba), fbm = number(totals.fbm);
-  const heading = type === 'fba' ? 'Nuovo flusso FBA' : type === 'daily' ? 'Riepilogo delle 08:00' : 'Riepilogo Picking';
-  const subject = type === 'fba' ? 'Picking · Nuovo FBA · ' + clean(label, 120) :
-    'Picking · ' + fba + ' FBA e ' + fbm + ' FBM da evadere';
-  const tab = type === 'fba' || (type === 'manual' && !fbm) ? 'fba' : 'fbm';
-  const link = URL + '?picking=' + tab;
-  const date = new Intl.DateTimeFormat('it-IT', { timeZone: TIME_ZONE,
-    day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(generatedAt));
-  const text = [heading, ...(type === 'fba' && label ? [clean(label)] : []), '',
-    fba + ' flussi FBA da evadere', fbm + ' ordini FBM da evadere', '', 'Apri Picking: ' + link].join('\n');
-  // Inline styles and presentation tables work in Gmail, Outlook and mobile mail.
-  // Colours come from Picking's final theme overrides, not the old base theme.
-  const html = `<!doctype html><html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(subject)}</title></head>
-<body style="margin:0;padding:0;background:#f6f7f9;color:#0f172a;font-family:Arial,Helvetica,sans-serif">
-<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f6f7f9"><tr><td align="center" style="padding:28px 12px">
-<table role="presentation" width="560" cellspacing="0" cellpadding="0" style="width:100%;max-width:560px;background:#ffffff;border:1px solid #e2e8f0;border-top:5px solid #0f7078;border-radius:12px">
-<tr><td style="padding:26px 24px 22px"><table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr><td style="font-size:23px;font-weight:700;color:#003c41">Picking</td><td align="right" style="font-size:12px;color:#64748b">${escapeHtml(date)}</td></tr></table></td></tr>
-<tr><td style="padding:0 24px 22px"><h1 style="margin:0;font-size:24px;line-height:1.25;font-weight:700;color:#0f172a">${heading}</h1>${type === 'fba' && label ? '<p style="margin:8px 0 0;font-size:15px;line-height:1.5;color:#64748b;word-break:break-word">' + escapeHtml(clean(label)) + '</p>' : ''}</td></tr>
-<tr><td style="padding:0 24px"><table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr>
-<td width="48%" valign="top" style="padding:20px 14px;background:#eef7f8;border:1px solid #d5e8e9;border-radius:9px"><div style="font-size:14px;font-weight:700;color:#0f7078">FBA</div><div style="margin:8px 0;font-size:42px;line-height:1.1;font-weight:700;color:#003c41">${fba}</div><div style="font-size:13px;line-height:1.4;color:#475569">Flussi da evadere</div></td>
-<td width="4%"></td>
-<td width="48%" valign="top" style="padding:20px 14px;background:#f6f7f9;border:1px solid #e2e8f0;border-radius:9px"><div style="font-size:14px;font-weight:700;color:#475569">FBM</div><div style="margin:8px 0;font-size:42px;line-height:1.1;font-weight:700;color:#0f172a">${fbm}</div><div style="font-size:13px;line-height:1.4;color:#475569">Ordini da evadere</div></td>
-</tr></table></td></tr>
-<tr><td style="padding:26px 24px 28px"><table role="presentation" cellspacing="0" cellpadding="0"><tr><td align="center" bgcolor="#0f7078" style="border-radius:7px"><a href="${link}" style="display:inline-block;padding:14px 24px;border:1px solid #0f7078;border-radius:7px;font-size:15px;font-weight:700;text-decoration:none;color:#ffffff">Apri Picking</a></td></tr></table></td></tr>
-</table></td></tr></table></body></html>`;
-  return { subject, text, html };
+function buildMessage(options) {
+  return renderMessage({ ...options, url: URL, timeZone: TIME_ZONE });
 }
 
 function canonical(value) {
@@ -216,6 +228,6 @@ function retryDelay(delivery) {
   return attempts === 1 ? 60 : 300;
 }
 
-module.exports = { PROJECT, REGION, URL, PREFIX, KIND, TIME_ZONE, clean, email, hash, validEmail, millis, number,
+module.exports = { PROJECT, REGION, URL, PREFIX, KIND, TIME_ZONE, MAIL_FROM, clean, skuKey, productTitle, email, hash, validEmail, millis, number,
   isEnabled, accessFor, summarizeFba, summarizeFbm, newWork, selectedForEvent, buildMessage,
-  pendingTotals, dailySlot, envelopeHash, deliveryOutcome, retryDelay };
+  pendingTotals, pendingDetails, dailySlot, envelopeHash, deliveryOutcome, retryDelay };

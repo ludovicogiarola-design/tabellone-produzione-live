@@ -141,7 +141,9 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     const mail = (await firstMail()).data();
     assert.equal(mail.to, worker.email);
     assert.equal(mail.picking.noticeType, 'manual');
-    assert.ok(mail.message.html.includes('Riepilogo Picking'));
+    assert.ok(mail.message.html.includes('AVVISO OPERATIVO'));
+    assert.equal(mail.from, 'LG Trading SRL - Picking Concamarise <info@generalcoppersrl.com>');
+    assert.deepEqual(results[0].summaryCounts, { fbaPieces: 4, fbaProducts: 1, fbmOrders: 1, fbmPieces: 5, fbmProducts: 1 });
     await assert.rejects(service.api('Bearer admin-token', { ...request, requestId: 'another_request_123456' }),
       error => error.status === 429);
   });
@@ -168,7 +170,7 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     assert.deepEqual(results[0].totals, { fba: 1, fbm: 1 });
     assert.equal((await db.collection('email').get()).size, 1);
     assert.equal((await firstMail()).data().picking.noticeType, 'daily');
-    assert.ok((await firstMail()).data().message.html.includes('Riepilogo delle 08:00'));
+    assert.ok((await firstMail()).data().message.html.includes('ORE 08:00'));
     assert.equal((await daily.onDaily({ scheduleTime: '2030-07-01T07:00:00Z' })).outcome, 'outside_schedule');
   });
   test('Daily selection after the scheduled time does not receive a delayed digest', async () => {
@@ -192,6 +194,23 @@ if (process.env.FIRESTORE_EMULATOR_HOST !== '127.0.0.1:8791') {
     const prefs = (await db.doc(RECIPIENTS + '/worker').get()).data();
     assert.equal(prefs.lastSentAt.toMillis(), endTime.toMillis());
     assert.equal(prefs.lastSentChannel, 'RIEPILOGO');
+  });
+  test('Detailed summary resolves legacy product titles and keeps exact remaining FBM quantities', async () => {
+    await select();
+    await createWork('fba');
+    await db.doc('amzInventory/concamarise/items/SKU').set({ sku: 'SKU', title: 'Mastice 1 kg SKU: SKU ASIN: OMIT' });
+    const order = await createWork('fbm', 'FBM');
+    await order.data.after.ref.update({ 'linesByLineId.a.inventoryAppliedQty': 2,
+      orderName: '##52391', orderDetails: { lineItems: [{ sku: 'SKU', title: 'Mastice per potature 1 kg' }] } });
+    const result = await service.api('Bearer admin-token', { action: 'sendSummary', requestId: 'product_detail_123456' });
+    const mail = (await firstMail()).data();
+    assert.equal(result.summaryCounts.fbaPieces, 4);
+    assert.equal(result.summaryCounts.fbmPieces, 3);
+    assert.ok(mail.message.html.includes('Mastice 1 kg'));
+    assert.ok(mail.message.html.includes('Mastice per potature 1 kg'));
+    assert.ok(mail.message.text.includes('#52391: 3 pezzi'));
+    assert.ok(!mail.message.text.includes('ASIN: OMIT'));
+    assert.ok(!mail.message.text.includes('##52391'));
   });
   test('No selected recipients means no send and no backfill on later selection', async () => {
     const event = await createWork();
